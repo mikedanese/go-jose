@@ -466,6 +466,7 @@ func (ctx ecDecrypterSigner) decryptKey(headers rawHeader, recipient *recipientI
 
 	return josecipher.KeyUnwrap(block, recipient.encryptedKey)
 }
+
 func (ctx edDecrypterSigner) signPayload(payload []byte, alg SignatureAlgorithm) (Signature, error) {
 	if alg != EdDSA {
 		return Signature{}, ErrUnsupportedAlgorithm
@@ -531,7 +532,7 @@ func (ctx ecDecrypterSigner) signPayload(payload []byte, alg SignatureAlgorithm)
 		keyBytes++
 	}
 
-	// We serialize the outpus (r and s) into big-endian byte arrays and pad
+	// We serialize the outputs (r and s) into big-endian byte arrays and pad
 	// them with zeros on the left to make sure the sizes work out. Both arrays
 	// must be keyBytes long, and the output must be 2*keyBytes long.
 	rBytes := r.Bytes()
@@ -588,4 +589,42 @@ func (ctx ecEncrypterVerifier) verifyPayload(payload []byte, signature []byte, a
 	}
 
 	return nil
+}
+
+// SigningOracle is an interface that supports signing payloads with opaque
+// private keys. Private key operations preformed by implementors may, for
+// example, occur in a hardware module.
+type SigningOracle interface {
+	Public() crypto.PublicKey
+	SignPayload(payload []byte, alg SignatureAlgorithm) ([]byte, error)
+}
+
+func newOracleSigner(alg SignatureAlgorithm, oracle SigningOracle) (recipientSigInfo, error) {
+	switch oracle.Public().(type) {
+	case ed25519.PublicKey:
+		if alg != EdDSA {
+			return recipientSigInfo{}, ErrUnsupportedAlgorithm
+		}
+	case *ecdsa.PublicKey:
+		switch alg {
+		case ES256, ES384, ES512:
+		default:
+			return recipientSigInfo{}, ErrUnsupportedAlgorithm
+		}
+	case *rsa.PublicKey:
+		switch alg {
+		case RS256, RS384, RS512, PS256, PS384, PS512:
+		default:
+			return recipientSigInfo{}, ErrUnsupportedAlgorithm
+		}
+	}
+	return recipientSigInfo{
+		sigAlg: alg,
+		publicKey: &JSONWebKey{
+			Key: oracle.Public(),
+		},
+		signer: &oracleSigner{
+			oracle: oracle,
+		},
+	}, nil
 }
