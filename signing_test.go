@@ -18,6 +18,7 @@ package jose
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -108,6 +109,29 @@ func TestRoundtripsJWS(t *testing.T) {
 
 		for i, serializer := range serializers {
 			err := RoundtripJWS(alg, serializer, corrupter, signingKey, verificationKey, "test_nonce")
+			if err != nil {
+				t.Error(err, alg, i)
+			}
+		}
+	}
+}
+
+func TestRoundtripsJWSWithOracle(t *testing.T) {
+	// Test matrix
+	sigAlgs := []SignatureAlgorithm{RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512, EdDSA}
+
+	serializers := []func(*JSONWebSignature) (string, error){
+		func(obj *JSONWebSignature) (string, error) { return obj.CompactSerialize() },
+		func(obj *JSONWebSignature) (string, error) { return obj.FullSerialize(), nil },
+	}
+
+	corrupter := func(obj *JSONWebSignature) {}
+
+	for _, alg := range sigAlgs {
+		signingKey, verificationKey := GenerateSigningTestKey(alg)
+
+		for i, serializer := range serializers {
+			err := RoundtripJWS(alg, serializer, corrupter, SigningOracleFromCryptoSigner(signingKey.(crypto.Signer)), verificationKey, "test_nonce")
 			if err != nil {
 				t.Error(err, alg, i)
 			}

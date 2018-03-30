@@ -24,6 +24,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 	"math/big"
@@ -627,4 +628,102 @@ func newOracleSigner(alg SignatureAlgorithm, oracle SigningOracle) (recipientSig
 			oracle: oracle,
 		},
 	}, nil
+}
+
+// SigningOracleFromCryptoSigner creates a SigningOracle from a "crypto".Signer
+func SigningOracleFromCryptoSigner(s crypto.Signer) SigningOracle {
+	return &cryptoSignerOracle{s}
+}
+
+type oracleSigner struct {
+	oracle SigningOracle
+}
+
+func (o *oracleSigner) signPayload(payload []byte, alg SignatureAlgorithm) (Signature, error) {
+	out, err := o.oracle.SignPayload(payload, alg)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	return Signature{
+		Signature: out,
+		protected: &rawHeader{},
+	}, nil
+}
+
+type cryptoSignerOracle struct {
+	crypto.Signer
+}
+
+func (o *cryptoSignerOracle) SignPayload(payload []byte, alg SignatureAlgorithm) ([]byte, error) {
+	var hash crypto.Hash
+	switch alg {
+	case EdDSA:
+	case RS256, PS256, ES256:
+		hash = crypto.SHA256
+	case RS384, PS384, ES384:
+		hash = crypto.SHA384
+	case RS512, PS512, ES512:
+		hash = crypto.SHA512
+	default:
+		return nil, ErrUnsupportedAlgorithm
+	}
+
+	var hashed []byte
+	if hash != crypto.Hash(0) {
+		hasher := hash.New()
+		// According to documentation, Write() on hash never fails
+		_, _ = hasher.Write(payload)
+		hashed = hasher.Sum(nil)
+	}
+
+	var (
+		out []byte
+		err error
+	)
+	switch alg {
+	case EdDSA:
+		out, err = o.Sign(randReader, payload, crypto.Hash(0))
+	case ES256, ES384, ES512:
+		var byteLen int
+		switch alg {
+		case ES256:
+			byteLen = 32
+		case ES384:
+			byteLen = 48
+		case ES512:
+			byteLen = 66
+		}
+		var b []byte
+		b, err = o.Sign(randReader, hashed, hash)
+		if err != nil {
+			return nil, err
+		}
+
+		sig := struct {
+			R, S *big.Int
+		}{}
+		_, err = asn1.Unmarshal(b, &sig)
+		if err != nil {
+			return nil, err
+		}
+
+		rBytes := sig.R.Bytes()
+		rBytesPadded := make([]byte, byteLen)
+		copy(rBytesPadded[byteLen-len(rBytes):], rBytes)
+
+		sBytes := sig.S.Bytes()
+		sBytesPadded := make([]byte, byteLen)
+		copy(sBytesPadded[byteLen-len(sBytes):], sBytes)
+
+		out = append(rBytesPadded, sBytesPadded...)
+	case RS256, RS384, RS512:
+		out, err = o.Sign(randReader, hashed, hash)
+	case PS256, PS384, PS512:
+		out, err = o.Sign(randReader, hashed, &rsa.PSSOptions{
+			SaltLength: rsa.PSSSaltLengthAuto,
+			Hash:       hash,
+		})
+	}
+	return out, err
 }
